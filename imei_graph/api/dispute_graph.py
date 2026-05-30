@@ -45,6 +45,19 @@ STOCK_DOCTYPES = {
     },
 }
 
+DOCTYPE_PREFIX_HINTS = (
+    ("ACC-SINV", "Sales Invoice"),
+    ("SINV", "Sales Invoice"),
+    ("ACC-PINV", "Purchase Invoice"),
+    ("PINV", "Purchase Invoice"),
+    ("MAT-DN", "Delivery Note"),
+    ("DN", "Delivery Note"),
+    ("MAT-PRE", "Purchase Receipt"),
+    ("PREC", "Purchase Receipt"),
+    ("MAT-STE", "Stock Entry"),
+    ("STE", "Stock Entry"),
+)
+
 
 @dataclass(frozen=True)
 class TransactionMeta:
@@ -109,6 +122,34 @@ def _get_transaction_meta(doctype: str, name: str) -> TransactionMeta:
         party_name=doc.get(config["party_name_field"]),
         is_return=doc.is_return or 0,
         return_against=doc.return_against,
+    )
+
+
+def _infer_transaction_doctype(name: str, preferred_doctype: str | None = None) -> str:
+    if preferred_doctype:
+        preferred_doctype = preferred_doctype.strip()
+        if preferred_doctype in STOCK_DOCTYPES and frappe.db.exists(preferred_doctype, name):
+            return preferred_doctype
+
+    upper_name = name.upper()
+    hinted_doctypes = [
+        doctype
+        for prefix, doctype in DOCTYPE_PREFIX_HINTS
+        if upper_name.startswith(prefix)
+    ]
+
+    for doctype in hinted_doctypes:
+        if frappe.db.exists(doctype, name):
+            return doctype
+
+    for doctype in STOCK_DOCTYPES:
+        if doctype not in hinted_doctypes and frappe.db.exists(doctype, name):
+            return doctype
+
+    frappe.throw(
+        _("Could not find {0} in Sales Invoice, Purchase Invoice, Delivery Note, Purchase Receipt, or Stock Entry").format(
+            name
+        )
     )
 
 
@@ -401,13 +442,13 @@ def _add_serial_node(nodes: dict[str, dict[str, Any]], meta: TransactionMeta, it
 
 
 @frappe.whitelist()
-def get_dispute_graph(start_doctype: str, start_name: str, max_depth: int = 8) -> dict[str, Any]:
+def get_dispute_graph(start_name: str, max_depth: int = 8, start_doctype: str | None = None) -> dict[str, Any]:
     max_depth = max(1, min(int(max_depth or 8), 20))
-    start_doctype = (start_doctype or "").strip()
     start_name = (start_name or "").strip()
+    start_doctype = _infer_transaction_doctype(start_name, start_doctype)
 
-    if not start_doctype or not start_name:
-        frappe.throw(_("Start transaction type and name are required"))
+    if not start_name:
+        frappe.throw(_("Invoice or transaction number is required"))
 
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []

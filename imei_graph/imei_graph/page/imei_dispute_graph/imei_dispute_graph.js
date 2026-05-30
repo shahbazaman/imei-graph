@@ -8,14 +8,7 @@ frappe.pages["imei-dispute-graph"].on_page_load = function (wrapper) {
     $(wrapper).find(".page-content").html(`
         <div class="imei-graph-shell">
             <div class="imei-graph-toolbar">
-                <select id="start_doctype" class="form-control">
-                    <option value="Sales Invoice">Sales Invoice</option>
-                    <option value="Purchase Invoice">Purchase Invoice</option>
-                    <option value="Delivery Note">Delivery Note</option>
-                    <option value="Purchase Receipt">Purchase Receipt</option>
-                    <option value="Stock Entry">Stock Entry</option>
-                </select>
-                <input id="start_name" class="form-control" type="text" placeholder="Disputed transaction name">
+                <input id="start_name" class="form-control" type="text" placeholder="Invoice / voucher number">
                 <input id="max_depth" class="form-control" type="number" min="1" max="20" value="8" title="Max depth">
                 <button id="build_graph" class="btn btn-primary">Build</button>
                 <span id="graph_status"></span>
@@ -28,7 +21,7 @@ frappe.pages["imei-dispute-graph"].on_page_load = function (wrapper) {
         .imei-graph-shell { padding: 16px; }
         .imei-graph-toolbar {
             display: grid;
-            grid-template-columns: 190px minmax(260px, 1fr) 90px 90px auto;
+            grid-template-columns: minmax(280px, 1fr) 90px 90px auto;
             gap: 10px;
             align-items: center;
             margin-bottom: 12px;
@@ -63,12 +56,11 @@ frappe.pages["imei-dispute-graph"].on_page_load = function (wrapper) {
     }
 
     function build_graph() {
-        const start_doctype = $("#start_doctype").val();
         const start_name = $("#start_name").val().trim();
         const max_depth = cint($("#max_depth").val() || 8);
 
         if (!start_name) {
-            frappe.msgprint("Enter the disputed transaction name.");
+            frappe.msgprint("Enter the disputed invoice or voucher number.");
             return;
         }
 
@@ -77,7 +69,7 @@ frappe.pages["imei-dispute-graph"].on_page_load = function (wrapper) {
 
         frappe.call({
             method: "imei_graph.api.dispute_graph.get_dispute_graph",
-            args: { start_doctype, start_name, max_depth },
+            args: { start_name, max_depth },
             callback: function (r) {
                 $("#build_graph").prop("disabled", false);
                 const data = r.message;
@@ -87,7 +79,9 @@ frappe.pages["imei-dispute-graph"].on_page_load = function (wrapper) {
                     return;
                 }
 
-                $("#graph_status").text(`${data.nodes.length} nodes, ${data.edges.length} links`);
+                $("#graph_status").text(
+                    `${data.root.doctype} ${data.root.name}: ${data.nodes.length} nodes, ${data.edges.length} links`
+                );
 
                 load_vis_network(function () {
                     const container = document.getElementById("imei_network");
@@ -139,4 +133,3 @@ frappe.pages["imei-dispute-graph"].on_page_load = function (wrapper) {
         if (event.which === 13) build_graph();
     });
 };
-
