@@ -130,7 +130,7 @@ def _get_transaction_items(meta: TransactionMeta) -> list[dict[str, Any]]:
         where parent = %s
         order by idx asc, name asc
         """,
-        meta.name,
+        (meta.name,),
         as_dict=True,
     )
 
@@ -152,18 +152,99 @@ def _get_transaction_items(meta: TransactionMeta) -> list[dict[str, Any]]:
     return items
 
 
-def _find_immediate_next_transaction(serial_no: str, current: TransactionMeta) -> dict[str, Any] | None:
+def _get_transaction_datetime(meta: TransactionMeta) -> Any:
+    return frappe.db.sql(
+        f"""
+        select {_transaction_datetime_sql()} as posting_datetime
+        from `tab{meta.doctype}` p
+        where p.name = %s
+        """,
+        (meta.name,),
+        as_dict=True,
+    )[0].posting_datetime
+
+
+def _find_next_from_item_tables(serial_no: str, current: TransactionMeta) -> dict[str, Any] | None:
     current_dt = frappe.db.sql(
         f"""
         select {_transaction_datetime_sql()} as posting_datetime
         from `tab{current.doctype}` p
         where p.name = %s
         """,
-        current.name,
+        (current.name,),
         as_dict=True,
     )[0].posting_datetime
 
-    candidates = frappe.db.sql(
+    candidates = []
+    for doctype, config in STOCK_DOCTYPES.items():
+        child_table = config["child_table"]
+        for serial_field in config["serial_fields"]:
+            rows = frappe.db.sql(
+                f"""
+                select
+                    c.name,
+                    c.name as voucher_detail_no,
+                    %s as voucher_type,
+                    p.name as voucher_no,
+                    c.item_code,
+                    c.item_name,
+                    c.qty,
+                    c.`{serial_field}` as serial_no,
+                    %s as serial_field,
+                    p.posting_date,
+                    p.posting_time,
+                    {_transaction_datetime_sql()} as posting_datetime,
+                    p.creation
+                from `tab{child_table}` c
+                inner join `tab{doctype}` p on p.name = c.parent
+                where
+                    p.docstatus < 2
+                    and p.name != %s
+                    and c.`{serial_field}` like %s
+                    and (
+                        {_transaction_datetime_sql()} > %s
+                        or (
+                            {_transaction_datetime_sql()} = %s
+                            and coalesce(p.creation, '1000-01-01') > coalesce(%s, '1000-01-01')
+                        )
+                    )
+                order by posting_datetime asc, p.creation asc, c.idx asc, c.name asc
+                limit 80
+                """,
+                (
+                    doctype,
+                    serial_field,
+                    current.name,
+                    f"%{serial_no}%",
+                    current_dt,
+                    current_dt,
+                    current.creation,
+                ),
+                as_dict=True,
+            )
+            for row in rows:
+                if serial_no in _parse_serials(row.serial_no):
+                    candidates.append(row)
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: (
+            row.posting_datetime,
+            row.creation,
+            row.voucher_type,
+            row.voucher_no,
+            row.voucher_detail_no,
+        )
+    )
+    return candidates[0]
+
+
+def _find_next_from_stock_ledger(serial_no: str, current: TransactionMeta) -> dict[str, Any] | None:
+    current_dt = _get_transaction_datetime(current)
+
+    rows = frappe.db.sql(
         """
         select
             sle.name,
@@ -171,9 +252,10 @@ def _find_immediate_next_transaction(serial_no: str, current: TransactionMeta) -
             sle.voucher_no,
             sle.voucher_detail_no,
             sle.item_code,
-            sle.warehouse,
-            sle.actual_qty,
+            null as item_name,
+            sle.actual_qty as qty,
             sle.serial_no,
+            'stock_ledger' as serial_field,
             sle.posting_date,
             sle.posting_time,
             sle.posting_datetime,
@@ -196,10 +278,14 @@ def _find_immediate_next_transaction(serial_no: str, current: TransactionMeta) -
         as_dict=True,
     )
 
-    for row in candidates:
+    for row in rows:
         if serial_no in _parse_serials(row.serial_no):
             return row
     return None
+
+
+def _find_immediate_next_transaction(serial_no: str, current: TransactionMeta) -> dict[str, Any] | None:
+    return _find_next_from_item_tables(serial_no, current) or _find_next_from_stock_ledger(serial_no, current)
 
 
 def _accounting_links(doctype: str, name: str) -> list[dict[str, str]]:
@@ -370,7 +456,15 @@ def get_dispute_graph(start_doctype: str, start_name: str, max_depth: int = 8) -
                     "label": "next movement",
                     "arrows": "to",
                     "color": {"color": "#f97316"},
-                    "title": f"SLE: {next_row.name}\nQty: {next_row.actual_qty}\nWarehouse: {next_row.warehouse or ''}",
+                    "title": "\n".join(
+                        [
+                            f"Source row: {next_row.name}",
+                            f"Item: {next_row.item_code or ''}",
+                            f"Qty: {next_row.qty or ''}",
+                            f"Serial field: {next_row.serial_field or ''}",
+                            f"Date: {next_row.posting_date or ''} {next_row.posting_time or ''}",
+                        ]
+                    ),
                 }
             )
 
